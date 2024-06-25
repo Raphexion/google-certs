@@ -4,7 +4,6 @@ defmodule GoogleCerts.Client do
   """
 
   require Logger
-  alias GoogleCerts.Env
 
   defmodule Response do
     @moduledoc """
@@ -18,7 +17,7 @@ defmodule GoogleCerts.Client do
     def new(exp, cert), do: %__MODULE__{expiration: exp, cert: cert}
   end
 
-  defp host, do: Env.google_host()
+  defp host, do: "https://www.googleapis.com"
 
   defp uri_path(1), do: {:ok, "/oauth2/v1/certs"}
   defp uri_path(2), do: {:ok, "/oauth2/v2/certs"}
@@ -30,16 +29,14 @@ defmodule GoogleCerts.Client do
   @callback get(binary(), list()) :: {:ok, :hackney.client_ref()} | {:error, term()}
   @callback body(any()) :: {:error, atom | {:closed, binary}} | {:ok, binary}
 
-  defp http_client, do: Application.get_env(Env.app(), :http_client, :hackney)
-
   @spec get(integer()) :: {:ok, Response.t()} | {:error, :req_google_certs}
   def get(version) do
     with {:ok, path} <- uri_path(version),
          {:req, {:ok, 200, headers, response}} <-
-           {:req, http_client().get(host() <> path, req_headers())},
+           {:req, :hackney.get(host() <> path, req_headers())},
          {:ok, seconds} <- max_age(headers),
          {:expiration, {:ok, expiration}} <- {:expiration, expiration(seconds)},
-         {:content, {:ok, body}} <- {:content, http_client().body(response)},
+         {:content, {:ok, body}} <- {:content, :hackney.body(response)},
          {:ok, decoded} <- Jason.decode(body) do
       {:ok, Response.new(expiration, decoded)}
     else

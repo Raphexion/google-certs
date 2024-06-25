@@ -1,102 +1,77 @@
 defmodule GoogleCerts.CertificateCache do
   @moduledoc """
-  Agent to hold the current public certs that google uses to sign JWTs
+  GenServer that keeps track of the certificates
   """
+  use GenServer
 
-  use Agent
   require Logger
-  alias GoogleCerts.{CertificateDecodeException, Certificates, Env}
 
-  @spec certificate_version :: integer()
-  defp certificate_version, do: Env.api_version()
+  alias GoogleCerts.Certificates
 
-  @spec start_link([] | Certificates.t()) :: GenServer.on_start()
-  def start_link([]) do
-    if Env.load_from_disk?() do
-      case load() do
-        {:ok, certs = %Certificates{}} ->
-          Logger.debug("Cache certificates from disk")
-          start_link(certs)
+  @default_name __MODULE__
+  @refresh_ms :timer.hours(1)
+  @goolge_api_version 3
 
-        _ ->
-          Logger.debug("Cache empty certificates")
+  @spec get(GenServer.server()) :: GoogleCerts.Certificates.t()
+  def get(server \\ @default_name) do
+    GenServer.call(server, :get)
+  end
 
-          cold_start()
-      end
+  def start_link(options, genserver_options) do
+    GenServer.start_link(__MODULE__, options, genserver_options)
+  end
+
+  def child_spec(args \\ []) do
+    options = Keyword.get(args, :options, [])
+    genserver_options = Keyword.get(args, :genserver_options, name: @default_name)
+
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [options, genserver_options]},
+      type: :worker
+    }
+  end
+
+  @impl true
+  def init(_) do
+    if fetch_on_start?() do
+      Logger.info("fetching certifcates on start")
+      Process.send_after(self(), :refresh, @refresh_ms, [])
+      {:ok, :no_state, {:continue, :load}}
     else
-      cold_start()
+      Logger.info("skip fetching certifcates on start")
+      {:ok, :missing}
     end
   end
 
-  def start_link(certs = %Certificates{}) do
-    if Env.auto_start?() do
-      Agent.start_link(
-        fn -> GoogleCerts.refresh(certs) end,
-        name: __MODULE__
-      )
-    else
-      :ignore
-    end
+  @impl true
+  def handle_continue(:load, _) do
+    {:noreply, fresh_certs()}
   end
 
-  defp cold_start do
+  @impl true
+  def handle_call(:get, _from, :missing) do
+    certs = fresh_certs()
+    {:reply, certs, certs}
+  end
+
+  def handle_call(:get, _from, certs) do
+    {:reply, certs, certs}
+  end
+
+  @impl true
+  def handle_info(:refresh, _) do
+    Process.send_after(self(), :refresh, @refresh_ms, [])
+    {:noreply, fresh_certs()}
+  end
+
+  defp fresh_certs do
     %Certificates{}
-    |> Certificates.set_version(certificate_version())
-    |> start_link()
+    |> Certificates.set_version(@goolge_api_version)
+    |> GoogleCerts.refresh()
   end
 
-  @doc """
-  Get and refresh GoogleCerts.
-
-  Cached GoogleCerts are returned if they are not expired, otherwise a network request is made
-  to get and cache the latest certificates. See `GoogleCerts.refresh/1`
-  """
-  @spec get :: GoogleCerts.Certificates.t()
-  def get, do: Agent.get(__MODULE__, & &1) |> GoogleCerts.refresh()
-
-  defp load do
-    with {:file_path, file_path} <- {:file_path, path()},
-         {:file_exists?, true} <- {:file_exists?, File.exists?(file_path)},
-         {:read_file, {:ok, json}} <- {:read_file, File.read(file_path)} do
-      try do
-        certs = Certificates.decode!(json)
-        Logger.debug("Certificates were loaded from disk.")
-        {:ok, certs}
-      rescue
-        e in [CertificateDecodeException, Jason.DecodeError] ->
-          Logger.warn(
-            "There was an error loading certificates from disk. #{Map.get(e, :message, "")}"
-          )
-
-          {:error, :decode_certs}
-      end
-    else
-      error ->
-        Logger.warn("Could not load certs from file. details: " <> inspect(error))
-        {:error, :load_certificates}
-    end
+  defp fetch_on_start? do
+    Application.get_env(:google_certs, :fetch_on_start?, true)
   end
-
-  @spec serialize(Certificates.t()) :: Certificates.t()
-  def serialize(certs = %Certificates{}) do
-    if Env.write_to_disk?() do
-      with {:file_path, file_path} <- {:file_path, path()},
-           {:open_file, {:ok, file}} <- {:open_file, File.open(file_path, [:write])},
-           {:encode, {:ok, json}} <- {:encode, Jason.encode(certs)},
-           {:write, :ok} <- {:write, IO.binwrite(file, json)},
-           {:close, :ok} <- {:close, File.close(file)} do
-        Logger.debug("Saved certificates. location: #{inspect(file_path)}")
-        certs
-      else
-        error ->
-          Logger.error("Error serializing certificates. Error: " <> inspect(error))
-          certs
-      end
-    else
-      Logger.debug("Writing certs to disk is disabled.")
-      certs
-    end
-  end
-
-  defp path, do: Path.join(Env.cache_path(), Env.file_name())
 end

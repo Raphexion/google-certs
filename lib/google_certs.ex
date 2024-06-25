@@ -10,7 +10,13 @@ defmodule GoogleCerts do
   """
 
   require Logger
-  alias GoogleCerts.{Certificate, CertificateCache, Certificates, Client, Client.Response, Env}
+
+  alias GoogleCerts
+  alias GoogleCerts.Certificate
+  alias GoogleCerts.CertificateCache
+  alias GoogleCerts.Certificates
+  alias GoogleCerts.Client
+  alias GoogleCerts.Client.Response
 
   @doc """
   Returns the currently stored `GoogleCerts.Certifcates`.
@@ -78,8 +84,6 @@ defmodule GoogleCerts do
     end
   end
 
-  defp client, do: Application.get_env(Env.app(), :client, Client)
-
   @doc """
   Returns a `GoogleCerts.Certifcates` that is not expired.
 
@@ -92,24 +96,16 @@ defmodule GoogleCerts do
     if Certificates.expired?(certs) do
       Logger.debug("Certificates are expired. Request new certificates via HTTP.")
 
-      case client().get(version) do
+      case Client.get(version) do
         {:ok, %Response{expiration: exp, cert: cert}} ->
           Logger.debug(
             "Retrieved new certificates (v#{inspect(version)}) via HTTP. Certificates will expire on: #{exp}"
           )
 
-          certs =
-            Certificates.new()
-            |> Certificates.set_version(version)
-            |> Certificates.set_expiration(exp)
-            |> add_certificates(cert)
-
-          # Async write updated certs to file (disabled by default)
-          Task.Supervisor.start_child(GoogleCerts.TaskSupervisor, fn ->
-            CertificateCache.serialize(certs)
-          end)
-
-          certs
+          Certificates.new()
+          |> Certificates.set_version(version)
+          |> Certificates.set_expiration(exp)
+          |> add_certificates(cert)
 
         error ->
           Logger.error("Error getting Google OAuth2 certificates. Error: " <> inspect(error))
